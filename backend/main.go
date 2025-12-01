@@ -9,9 +9,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 )
@@ -53,15 +55,36 @@ type GeminiResponse struct {
 	} `json:"candidates"`
 }
 
-const (
-	PORT          = ":8080"
-	SpreadSheetID = "1OCDhJK_0zgPgpZXmM5vCan-HaY5Y4Ys5qQlJ1u62usk"
-	GeminiApiKey  = "AIzaSyCcfKYW8kEbWlXojzrG9MMaYQymHtgQVlM"
-	CredsFile     = "credentials.json"
-	GeminiApiUrl  = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key="
+var (
+	PORT          string
+	SpreadSheetID string
+	GeminiApiKey  string
+	CredsFile     string
+	GeminiApiUrl  string
 )
 
 func main() {
+
+	_ = godotenv.Load()
+
+	// 2. Load Variables from Environment
+	PORT = os.Getenv("PORT")
+	if PORT == "" {
+		PORT = ":8080" // Default fallback
+	}
+	// Ensure port starts with ":" if it's just a number (Render often gives just "10000")
+	if !strings.HasPrefix(PORT, ":") {
+		PORT = ":" + PORT
+	}
+
+	SpreadSheetID = os.Getenv("SpreadSheetID")
+	GeminiApiKey = os.Getenv("GeminiApiKey")
+	CredsFile = os.Getenv("CredsFile")
+	GeminiApiUrl = os.Getenv("GeminiApiUrl")
+
+	if SpreadSheetID == "" || GeminiApiKey == "" {
+		log.Fatal("❌ CRITICAL ERROR: SPREADSHEET_ID or GEMINI_API_KEY is missing from environment variables!")
+	}
 
 	mux := http.NewServeMux()
 
