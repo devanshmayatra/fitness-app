@@ -932,7 +932,7 @@ class _StatItem extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Icon(icon, size: 16, color: kSubTextColor),
+        Icon(icon, size: 15, color: kSubTextColor),
         const SizedBox(width: 4),
         Text(
           value,
@@ -942,7 +942,7 @@ class _StatItem extends StatelessWidget {
             color: kSecondaryAccent,
           ),
         ),
-        const SizedBox(width: 4),
+        const SizedBox(width: 3),
         Text(label, style: const TextStyle(fontSize: 10, color: kSubTextColor)),
       ],
     );
