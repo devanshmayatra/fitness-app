@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +14,7 @@ import (
 	"github.com/joho/godotenv"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
+	"google.golang.org/genai"
 )
 
 // Struct to parse Gemini's answer so we can save it
@@ -60,7 +59,7 @@ var (
 	SpreadSheetID string
 	GeminiApiKey  string
 	CredsFile     string
-	GeminiApiUrl  string
+	GeminiModel   = "gemini-2.5-flash"
 )
 
 func main() {
@@ -80,7 +79,7 @@ func main() {
 	SpreadSheetID = os.Getenv("SpreadSheetID")
 	GeminiApiKey = os.Getenv("GeminiApiKey")
 	CredsFile = os.Getenv("CredsFile")
-	GeminiApiUrl = os.Getenv("GeminiApiUrl")
+	// GeminiApiUrl = os.Getenv("GeminiApiUrl")
 
 	if SpreadSheetID == "" || GeminiApiKey == "" {
 		log.Fatal("❌ CRITICAL ERROR: SPREADSHEET_ID or GEMINI_API_KEY is missing from environment variables!")
@@ -91,7 +90,7 @@ func main() {
 	mux.HandleFunc("POST /submit", handleSubmit)
 	mux.HandleFunc("POST /analyze-image", handleImageAnalysis)
 	mux.HandleFunc("GET /data", handleGetData)
-	mux.HandleFunc("POST /seed-schedule", handleSeedSchedule)
+	// mux.HandleFunc("POST /seed-schedule", handleSeedSchedule)
 
 	// Start Server
 	fmt.Println("------------------------------------------------")
@@ -132,9 +131,10 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Saved Successfully"))
 }
 
+// --- 2. IMAGE ANALYSIS & AUTO-SAVE HANDLER ---
 func handleImageAnalysis(w http.ResponseWriter, r *http.Request) {
-	// 1. Parse Uploaded File
-	r.ParseMultipartForm(10 << 20) // 10MB limit
+	// A. Parse File
+	r.ParseMultipartForm(10 << 20)
 	file, _, err := r.FormFile("image")
 	if err != nil {
 		http.Error(w, "No image found", http.StatusBadRequest)
@@ -142,41 +142,27 @@ func handleImageAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 2. Read & Encode Image to Base64
 	imgBytes, err := io.ReadAll(file)
 	if err != nil {
-		http.Error(w, "File read error", http.StatusInternalServerError)
+		http.Error(w, "Read error", http.StatusInternalServerError)
 		return
 	}
-	base64Img := base64.StdEncoding.EncodeToString(imgBytes)
+	// Note: We no longer Base64 encode here; we pass raw bytes to the SDK helper
 
-	// 3. Send to Gemini
-	resultJSON, err := callGemini(base64Img)
+	// B. Call AI
+	resultJSON, err := callGemini(imgBytes)
 	if err != nil {
 		log.Printf("AI Error: %v", err)
-		http.Error(w, "AI Analysis Failed", http.StatusInternalServerError)
+		http.Error(w, "AI Error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// --- NEW: AUTO-SAVE LOGIC ---
-	// 1. Unmarshal the JSON from AI (Turn string into object)
+	// --- AUTO-SAVE LOGIC ---
 	var cardio CardioData
 	if err := json.Unmarshal([]byte(resultJSON), &cardio); err == nil {
-
-		// 2. Create the row data
 		timestamp := time.Now().Format("2006-01-02 15:04:05")
+		rowToSave := []string{"Cardio", timestamp, "AI Scan", cardio.Duration, cardio.Distance, cardio.Calories}
 
-		// ROW FORMAT: [Type, Date, Details, Duration, Distance, Calories]
-		rowToSave := []string{
-			"Cardio",
-			timestamp,
-			"Treadmill (AI Auto-Scan)",
-			cardio.Duration,
-			cardio.Distance,
-			cardio.Calories,
-		}
-
-		// 3. Save directly to "Logs" sheet
 		saveErr := saveToGoogleSheets("Logs", rowToSave)
 		if saveErr != nil {
 			fmt.Printf("⚠️ AI analysis worked, but Auto-Save failed: %v\n", saveErr)
@@ -184,12 +170,9 @@ func handleImageAnalysis(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("✅ Auto-saved AI Cardio to Logs: %v\n", rowToSave)
 		}
 	}
-	// ---------------------------
 
-	// C. Return result to App (so user sees confirmation)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(resultJSON))
-
 }
 
 func handleGetData(w http.ResponseWriter, r *http.Request) {
@@ -315,13 +298,22 @@ func saveToGoogleSheets(targetSheet string, data []string) error {
 	return err
 }
 
-// --- HELPER: GEMINI API CALL ---
-func callGemini(base64Image string) (string, error) {
+func callGemini(imgBytes []byte) (string, error) {
 	if GeminiApiKey == "" || strings.Contains(GeminiApiKey, "PASTE_YOUR") {
-		return "", fmt.Errorf("API Key is missing")
+		return "", fmt.Errorf("API Key is missing/invalid")
 	}
 
-	// Prompt for the AI
+	ctx := context.Background()
+
+	// 1. Initialize Client
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey: GeminiApiKey,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create GenAI client: %v", err)
+	}
+
+	// 2. Prepare Prompt and Image
 	prompt := `Analyze this treadmill/cardio screen. Extract:
 	1. Duration (Time)
 	2. Distance (km or miles)
@@ -329,41 +321,33 @@ func callGemini(base64Image string) (string, error) {
 	Return ONLY a JSON object. No markdown.
 	Format: {"duration": "xx:xx", "distance": "x.x", "calories": "xxx"}`
 
-	// Build Request Body
-	reqBody := GeminiRequest{
-		Contents: []Content{
-			{
-				Parts: []Part{
-					{Text: prompt},
-					{InlineData: &InlineData{MimeType: "image/jpeg", Data: base64Image}},
+	// 3. Call the API using the correct structure
+	// We wrap our Parts in a Content object
+	resp, err := client.Models.GenerateContent(ctx, GeminiModel, []*genai.Content{
+		{
+			Parts: []*genai.Part{
+				{
+					Text: prompt,
+				},
+				{
+					InlineData: &genai.Blob{
+						MIMEType: "image/jpeg",
+						Data:     imgBytes,
+					},
 				},
 			},
 		},
-	}
+	}, nil)
 
-	jsonData, _ := json.Marshal(reqBody)
-
-	// Send Request
-	resp, err := http.Post(GeminiApiUrl+GeminiApiKey, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	// Parse Response
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	var geminiResp GeminiResponse
-	if err := json.Unmarshal(bodyBytes, &geminiResp); err != nil {
-		return "", err
+		return "", fmt.Errorf("GenerateContent error: %v", err)
 	}
 
-	// Extract and Clean Text
-	if len(geminiResp.Candidates) > 0 && len(geminiResp.Candidates[0].Content.Parts) > 0 {
-		text := geminiResp.Candidates[0].Content.Parts[0].Text
-		text = strings.ReplaceAll(text, "```json", "")
-		text = strings.ReplaceAll(text, "```", "")
-		return strings.TrimSpace(text), nil
-	}
+	// 4. Extract Text using the helper method
+	text := resp.Text()
 
-	return "", fmt.Errorf("AI returned no data")
+	// Clean up markdown if present
+	text = strings.ReplaceAll(text, "```json", "")
+	text = strings.ReplaceAll(text, "```", "")
+	return strings.TrimSpace(text), nil
 }
